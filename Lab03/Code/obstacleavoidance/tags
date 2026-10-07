@@ -1,0 +1,4 @@
+Mmain	main.c	/^int main() {$/
+wait	main.c	/^void wait(unsigned long num) {$/
+weightleft	main.c	15
+weightright	main.c	16

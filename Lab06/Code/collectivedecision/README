@@ -1,0 +1,21 @@
+How to use this program:
+
+Once uploaded on the epuck, the position of the selector (on the top of the epuck-jumper board) influences the behavior of the robot:
+
+-> Forward: The robot chooses randomly the left or right wall following behavior at startup, and its decision in evaluated each second against the neigbhours decision
+-> Left: Left wall following
+-> Right: Right wall following
+-> Rear: This position is only for callibration purpose (see after). When done, continue by changing the selector. Do it once at the begining of the lab, that is enough. You won't need to perform it again, as the calibration values are stored in the EEPROM of the robot
+-> Other: Invalid position, all the LEDs of the robot light on
+
+
+Calibration:
+
+  As the proximity sensors are not calibrated, they all give different values for the same distance. This can badly influence the performance of the wall-following function, even leading to an incorrect behaviour. To avoid this, a calibration routine has been implemented. During the calibration, the robot MUST BE away from any obstacles, user included. To run it at startup, select the 'Rear' position of the selector. Here is the way it performs:
+
+1) Read the first 9 bytes in EEPROM (in reality, 16 bytes are read in order to perform a faster access -> row access)
+2) If a calibration doesn't exist (9th byte is not 0x5555) or if the selector is on the 'rear' position, enter the calibration routine, otherwise keep thoses values and go to point 6)
+3)     Light on all the LEDs, to warn the user
+4)     Read all the sensors, providing the 'zero-level' values
+5)     Write thoses values to the EEPROM
+6) Done, continue with the main program

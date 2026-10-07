@@ -1,0 +1,2 @@
+Mmain	main.c	/^int main() {$/
+wait	main.c	/^void wait(unsigned long num) {$/

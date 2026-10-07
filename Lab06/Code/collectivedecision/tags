@@ -1,0 +1,78 @@
+COM_POWER	collectivedecision.c	37
+DECISION_INTERVAL	collectivedecision.c	35
+GROUP_ID	collectivedecision.c	31
+Mcollectivedecision	collectivedecision.c	/^int main() {$/
+OPCHANGE_PROB	collectivedecision.c	36
+OPINION_LEFT	collectivedecision.c	53
+OPINION_RIGHT	collectivedecision.c	54
+SELECTOR_FRONT	collectivedecision.c	44
+SELECTOR_LEFT	collectivedecision.c	43
+SELECTOR_REAR	collectivedecision.c	42
+SELECTOR_RIGHT	collectivedecision.c	41
+_EEDATA	collectivedecision.c	/^int _EEDATA(32) EEcalib[16];		\/\/ 16 bytes (EEPROM)/
+_EE_ERASE_ALL_CODE	libpic30.h	168
+_EE_ERASE_ROW_CODE	libpic30.h	167
+_EE_ERASE_WORD_CODE	libpic30.h	166
+_EE_ROW	libpic30.h	175
+_EE_ROW_WRITE_CODE	libpic30.h	170
+_EE_WORD	libpic30.h	174
+_EE_WORD_WRITE_CODE	libpic30.h	169
+_FLASH_ERASE_CODE	libpic30.h	164
+_FLASH_ERASE_CODE	libpic30.h	179
+_FLASH_ERASE_CODE	libpic30.h	190
+_FLASH_ERASE_CODE	libpic30.h	201
+_FLASH_ERASE_GENERAL_SEGMENT_CODE	libpic30.h	180
+_FLASH_ERASE_GENERAL_SEGMENT_CODE	libpic30.h	191
+_FLASH_ERASE_SECURE_SEGMENT_CODE	libpic30.h	181
+_FLASH_ERASE_SECURE_SEGMENT_CODE	libpic30.h	192
+_FLASH_PAGE	libpic30.h	172
+_FLASH_PAGE	libpic30.h	185
+_FLASH_PAGE	libpic30.h	196
+_FLASH_PAGE	libpic30.h	205
+_FLASH_ROW	libpic30.h	173
+_FLASH_ROW	libpic30.h	186
+_FLASH_ROW	libpic30.h	197
+_FLASH_ROW	libpic30.h	206
+_FLASH_WRITE_ROW_CODE	libpic30.h	165
+_FLASH_WRITE_ROW_CODE	libpic30.h	182
+_FLASH_WRITE_ROW_CODE	libpic30.h	193
+_FLASH_WRITE_ROW_CODE	libpic30.h	202
+_FLASH_WRITE_WORD_CODE	libpic30.h	183
+_FLASH_WRITE_WORD_CODE	libpic30.h	194
+_FLASH_WRITE_WORD_CODE	libpic30.h	203
+_T1Interrupt	collectivedecision.c	/^void _ISRFAST _T1Interrupt(void) {$/
+__LIBPIC30_H	libpic30.h	11
+_erase_eedata	libpic30.h	/^void _erase_eedata(_prog_addressT dst, int len) {$/
+_erase_eedata_all	libpic30.h	252
+_erase_flash	libpic30.h	/^void _erase_flash(_prog_addressT dst) {$/
+_init_prog_address	libpic30.h	/^#define _init_prog_address(a,b) {      \\$/
+_memcpy_p2d16	libpic30.h	/^_memcpy_p2d16(char *dest, _prog_addressT src, unsi/
+_memcpy_p2d24	libpic30.h	/^_memcpy_p2d24(char *dest, _prog_addressT src, unsi/
+_prog_addressT	libpic30.h	87
+_prog_address_tag	libpic30.h	79
+_strncpy_p2d16	libpic30.h	/^_strncpy_p2d16(char *dest, _prog_addressT src, uns/
+_strncpy_p2d24	libpic30.h	/^_strncpy_p2d24(char *dest, _prog_addressT src, uns/
+_wait_eedata	libpic30.h	/^#define _wait_eedata() { while (NVMCONbits.WR); }$/
+_write_eedata_row	libpic30.h	/^void _write_eedata_row(_prog_addressT dst, int *sr/
+_write_eedata_word	libpic30.h	/^void _write_eedata_word(_prog_addressT dst, int da/
+_write_flash16	libpic30.h	/^void _write_flash16(_prog_addressT dst, int *src) /
+_write_flash24	libpic30.h	/^void _write_flash24(_prog_addressT dst, long *src)/
+_write_flash_word16	libpic30.h	/^void _write_flash_word16(_prog_addressT dst, int d/
+_write_flash_word24	libpic30.h	/^void _write_flash_word24(_prog_addressT dst, long /
+broadcast_opinion_packet	collectivedecision.c	/^void broadcast_opinion_packet() {$/
+calibrate_sensors	collectivedecision.c	/^void calibrate_sensors(void)$/
+follow_and_avoid_wall	collectivedecision.c	/^inline void follow_and_avoid_wall(void)$/
+have_to_broadcast_opinion	collectivedecision.c	57
+high	libpic30.h	83
+low	libpic30.h	82
+message_counter_left	collectivedecision.c	55
+message_counter_right	collectivedecision.c	56
+next	libpic30.h	85
+opinion	collectivedecision.c	52
+packet_received	collectivedecision.c	/^void packet_received() {$/
+robot_id	collectivedecision.c	59
+show_opinion	collectivedecision.c	/^void show_opinion(void)$/
+start_timer1	collectivedecision.c	/^void start_timer1(int interval) {$/
+w	libpic30.h	84
+weight_leftwallfollow	collectivedecision.c	48
+weight_rightwallfollow	collectivedecision.c	49

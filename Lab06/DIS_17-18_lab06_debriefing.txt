@@ -1,0 +1,6 @@
+For this lab, we had to ask Samuel to place the "plugins" folder in Webots installation codes at 
+[webots directory]/resources/projects/plugins/radio/omnet
+He also needed to export the path to the dependencies folder as follows :
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../plugins/radio/omnet/dependencies
+
+

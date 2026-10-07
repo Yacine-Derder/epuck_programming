@@ -1,0 +1,15 @@
+Version 1.2 (October 2015, Florian Maushart)
+
+- Restructured the code to make it correspond better to the Webots version
+
+Version 1.1 (November 2009, Florian Vaussard)
+
+- Com-module lib updated for the latest version of the turret's firmware (using TinyOS 2.1)
+- Not using the e_robot_id lib anymore, use the turret's id instead
+- Improved wall following (the robot turns immediatly when it changes its decision) and improved robot-user interaction
+- Sensors callibration at startup + storage in EEPROM
+
+Version 1.0 (???, Christopher Cianci)
+
+- First release
+

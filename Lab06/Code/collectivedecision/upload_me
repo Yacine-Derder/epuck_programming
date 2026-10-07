@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Loop for each input argument
+for i
+do
+	rfcomm connect $i &
+done
+
+# Wait here
+read
+
+# Upload on all epucks
+epuckupload -f collectivedecision.hex $*
+
+# Wait here
+read
+
+# Disconnect all
+killall rfcomm
+

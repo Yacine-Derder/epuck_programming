@@ -1,0 +1,9 @@
+Mmain	main.c	/^int main()$/
+PI	main.c	50
+_MAIN_H	main.h	2
+align	main.c	/^void align(int ref_point){$/
+buffer	main.c	53
+go	main.c	/^void go(double y_coord){$/
+rotate	main.c	/^void rotate(double angle){$/
+set_speed	main.c	/^void set_speed(int leftwheel, int rightwheel){$/
+wait_10ms	main.c	/^void wait_10ms(void){$/
