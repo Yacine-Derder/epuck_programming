@@ -20,7 +20,7 @@ import bind_epucks as script
 @unittest.skipUnless(dbus is not None and shutil.which('dbus-daemon'),
                      'Needs dbus-daemon, python3-dbus and python3-gi')
 class PrivateBlueZTests(unittest.TestCase):
-    def exercise(self, saved=False, reject=False, absent=False):
+    def exercise(self, saved=False, reject=False, absent=False, persistent=False, number=91, reuse=False):
         DBusGMainLoop(set_as_default=True)
         daemon = subprocess.Popen(
             ['dbus-daemon', '--session', '--nofork', '--print-address=1'],
@@ -32,9 +32,11 @@ class PrivateBlueZTests(unittest.TestCase):
         bus = dbus.bus.BusConnection(address)
         self.addCleanup(bus.close)
         name = dbus.service.BusName('org.bluez', bus)
-        path = '/org/bluez/hci0/dev_' + script.EPUCKS[91].replace(':', '_')
+        path = '/org/bluez/hci0/dev_' + script.EPUCKS[number].replace(':', '_')
         state = {'paired': saved, 'trusted': False, 'pin': None, 'registered': False,
-                 'unregistered': False, 'pair_calls': 0, 'scanning': False}
+                 'unregistered': False, 'pair_calls': 0, 'scanning': False,
+                 'default_sender': None, 'later_pins': [], 'unknown_rejected': False,
+                 'reuse_ready': False}
 
         class Root(dbus.service.Object):
             @dbus.service.method('org.freedesktop.DBus.ObjectManager',
@@ -43,7 +45,7 @@ class PrivateBlueZTests(unittest.TestCase):
                 objects = {'/org/bluez/hci0': {'org.bluez.Adapter1': {'Powered': True}}}
                 if not absent:
                     objects[path] = {'org.bluez.Device1': {
-                        'Address': script.EPUCKS[91], 'Paired': state['paired'],
+                        'Address': script.EPUCKS[number], 'Paired': state['paired'],
                         'Trusted': state['trusted']}}
                 return objects
 
@@ -53,6 +55,10 @@ class PrivateBlueZTests(unittest.TestCase):
                 assert str(agent) == script.AGENT_PATH
                 assert str(capability) == 'KeyboardOnly'
                 state['registered'] = True
+
+            @dbus.service.method('org.bluez.AgentManager1', in_signature='o', sender_keyword='sender')
+            def RequestDefaultAgent(self, agent, sender=None):
+                state['default_sender'] = sender
 
             @dbus.service.method('org.bluez.AgentManager1', in_signature='o')
             def UnregisterAgent(self, agent):
@@ -74,6 +80,10 @@ class PrivateBlueZTests(unittest.TestCase):
                         state['paired'] = True
                         reply()
                 agent.RequestPinCode(path, reply_handler=got_pin, error_handler=error)
+
+            @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='ss', out_signature='v')
+            def Get(self, interface, prop):
+                return script.EPUCKS[number]
 
             @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='ssv')
             def Set(self, interface, prop, value):
@@ -97,11 +107,51 @@ class PrivateBlueZTests(unittest.TestCase):
                    Device(bus, path), Adapter(bus, '/org/bluez/hci0')]
         worker = subprocess.Popen(
             [sys.executable, str(Path(script.__file__).resolve()),
-             '--pair-device', '91', '--pair-timeout', '1'],
+             *(['--pin-agent'] if persistent else ['--pair-device', str(number), '--pair-timeout', '1'])],
             env={**os.environ, 'DBUS_SYSTEM_BUS_ADDRESS': address},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         loop = GLib.MainLoop()
+        callback_started = False
+        reuser = None
+        def cleanup_reuser():
+            if reuser is not None:
+                if reuser.poll() is None:
+                    reuser.kill()
+                reuser.communicate()
+        self.addCleanup(cleanup_reuser)
         def poll():
+            nonlocal callback_started, reuser
+            if persistent and reuse and state['default_sender']:
+                if reuser is None:
+                    reuser = subprocess.Popen(
+                        [sys.executable, str(Path(script.__file__).resolve()), '--pin-agent'],
+                        env={**os.environ, 'DBUS_SYSTEM_BUS_ADDRESS': address},
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    return True
+                if reuser.poll() is None:
+                    return True
+                if not state['reuse_ready']:
+                    output, error = reuser.communicate()
+                    state['reuse_ready'] = reuser.returncode == 0 and output.strip() == 'READY'
+            if persistent and state['default_sender'] and not callback_started:
+                callback_started = True
+                agent = dbus.Interface(bus.get_object(state['default_sender'], script.AGENT_PATH),
+                                       'org.bluez.Agent1')
+                def stop(error=None):
+                    if error is not None:
+                        state['unknown_rejected'] = True
+                    dbus.Interface(bus.get_object(script.PIN_AGENT_NAME,
+                                   script.AGENT_PATH + '/control'), script.PIN_AGENT_NAME).Stop(
+                                       reply_handler=lambda: None, error_handler=lambda err: None)
+                def second(pin):
+                    state['later_pins'].append(str(pin))
+                    # A non-device path cannot supply a known Address property.
+                    agent.RequestPinCode('/unknown', reply_handler=lambda pin: stop(),
+                                         error_handler=stop)
+                def first(pin):
+                    state['later_pins'].append(str(pin))
+                    agent.RequestPinCode(path, reply_handler=second, error_handler=stop)
+                agent.RequestPinCode(path, reply_handler=first, error_handler=stop)
             if worker.poll() is not None:
                 loop.quit()
                 return False
@@ -124,6 +174,20 @@ class PrivateBlueZTests(unittest.TestCase):
             for obj in exports:
                 obj.remove_from_connection()
         return worker.returncode, stderr, state
+
+    def test_persistent_default_agent_handles_later_requests(self):
+        code, error, state = self.exercise(persistent=True, number=76)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(state['pair_calls'], 0)
+        self.assertEqual(state['later_pins'], ['0076', '0076'])
+        self.assertTrue(state['unknown_rejected'])
+        self.assertTrue(state['unregistered'])
+
+    def test_agent_is_reused_on_second_run(self):
+        code, error, state = self.exercise(persistent=True, number=76, reuse=True)
+        self.assertEqual(code, 0, error)
+        self.assertTrue(state['reuse_ready'])
+        self.assertEqual(state['later_pins'], ['0076', '0076'])
 
     def test_real_agent_pin_callback_and_trust(self):
         code, error, state = self.exercise()

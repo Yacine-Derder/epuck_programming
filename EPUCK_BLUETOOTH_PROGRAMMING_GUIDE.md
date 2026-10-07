@@ -99,11 +99,30 @@ python3 bind_epucks.py --list
 
 #### What the Binding Script Does
 
-The script first attempts to pair each selected robot through BlueZ and mark it
-trusted. Its PIN is the robot number padded to four digits (e.g. `91` → `0091`).
-Turn on Bluetooth and the robot for the initial pairing. Existing pairings are
-reused; the script does not delete pairing keys or change the desktop's default
-Bluetooth agent. BlueZ normally saves pairing keys across reboots on this machine.
+The script starts (or reuses) a background BlueZ PIN agent, then attempts to pair
+and trust each selected robot. Its PIN is the robot number padded to four digits
+(e.g. `76` → `0076`). Existing pairings are reused and pairing keys are preserved.
+Turn on Bluetooth and the robot for the initial pairing.
+
+The background agent stays available after binding finishes. This matters when
+an e-puck asks for its PIN again during code upload, serial monitoring, or after
+a reset, even though Ubuntu shows it as paired and trusted. A temporary agent
+used only for the initial pairing cannot handle these later requests.
+
+The agent becomes BlueZ's default agent and only supplies credentials for MAC
+addresses in `EPUCKS`. While it runs, pairing/authentication requests for unrelated
+Bluetooth devices are rejected. Stop it before pairing another Bluetooth device:
+
+```bash
+sudo /usr/bin/python3 bind_epucks.py --stop-agent
+```
+
+Stopping unregisters the agent; BlueZ falls back to the previous registered
+default agent if one remains. Run the binding script again to reactivate the
+e-puck agent. It also needs to be restarted after a reboot or Bluetooth service
+restart. If you edit `EPUCKS`, stop the agent and run the binding script again
+to load the updated robot list. No system service or permanent Bluetooth setting
+is installed.
 
 On Ubuntu/Debian, automatic pairing needs the system Python packages:
 
@@ -112,14 +131,14 @@ sudo apt install python3-dbus python3-gi
 sudo /usr/bin/python3 bind_epucks.py 91
 ```
 
-If pairing fails, dependencies are missing, or the robot is unavailable, the
-script warns and still runs the original RFCOMM bind. Manual PIN entry may then
+If agent startup or pairing fails, dependencies are missing, or the robot is
+unavailable, the script warns and still runs the original RFCOMM bind. Manual PIN entry may then
 be needed when uploading or monitoring. Pairing/discovery has a 30-second limit
 per robot, with a short allowance for cleanup. Select only the powered robots
 to avoid waiting for offline ones.
 
 ```bash
-# Original binding workflow, without attempting pairing
+# Original binding workflow, without starting an agent or attempting pairing
 sudo python3 bind_epucks.py --no-pair 91
 
 # Allow more time for initial discovery/pairing
@@ -129,7 +148,8 @@ sudo python3 bind_epucks.py --pair-timeout 60 91
 python3 bind_epucks.py --dry-run --replace 91
 ```
 
-`--list` and `--release` do not attempt pairing. `--replace` still releases the
+`--list` and `--release` do not start an agent or attempt pairing. `--no-pair`
+skips startup/pairing but does not stop an already running background agent. `--replace` still releases the
 selected RFCOMM device before binding it, even when pairing fails.
 
 After the pairing attempt, the script executes:

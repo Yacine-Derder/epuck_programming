@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
 
@@ -24,6 +26,7 @@ EPUCKS = {
 
 RFCOMM_CHANNEL = "1"
 AGENT_PATH = "/org/epuck/agent"
+PIN_AGENT_NAME = "org.epuck.PinAgent"
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 
@@ -65,25 +68,33 @@ def run_command(command: list[str], dry_run: bool) -> None:
         subprocess.run(command, check=True)
 
 
-def make_pairing_agent(dbus, bus, device_path: str, number: int):
-    """Register credentials only for the selected robot, never a default agent."""
+def make_pairing_agent(dbus, bus, device_path: str | None, number: int | None,
+                       on_release=None):
+    """Supply PINs for one pairing, or known MACs in the persistent agent."""
     class Rejected(dbus.DBusException):
         _dbus_error_name = "org.bluez.Error.Rejected"
 
     class Agent(dbus.service.Object):
         def check_device(self, device):
-            if str(device) != device_path:
-                raise Rejected("Unknown e-puck")
+            if device_path is not None:
+                if str(device) != device_path:
+                    raise Rejected("Unknown e-puck")
+                return number
+            properties = dbus.Interface(bus.get_object("org.bluez", device),
+                                        "org.freedesktop.DBus.Properties")
+            address = str(properties.Get("org.bluez.Device1", "Address", timeout=2)).upper()
+            for known_number, mac in EPUCKS.items():
+                if address == mac.upper():
+                    return known_number
+            raise Rejected("Unknown e-puck; stop the e-puck PIN agent to pair other devices")
 
         @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
         def RequestPinCode(self, device):
-            self.check_device(device)
-            return f"{number:04d}"
+            return f"{self.check_device(device):04d}"
 
         @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
         def RequestPasskey(self, device):
-            self.check_device(device)
-            return dbus.UInt32(number)
+            return dbus.UInt32(self.check_device(device))
 
         @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
         def AuthorizeService(self, device, uuid):
@@ -95,9 +106,110 @@ def make_pairing_agent(dbus, bus, device_path: str, number: int):
 
         @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
         def Release(self):
-            pass
+            if on_release is not None:
+                on_release()
 
     return Agent(bus, AGENT_PATH)
+
+
+def run_pin_agent() -> None:
+    """Stay alive as the default agent for kernel RFCOMM's later PIN requests.
+
+    The bus name provides single-instance ownership without PID files. This
+    process lasts until reboot, explicit stop, or BlueZ shutdown.
+    """
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    if bus.name_has_owner(PIN_AGENT_NAME):
+        # Re-activate the existing daemon if the desktop replaced its agent.
+        dbus.Interface(bus.get_object(PIN_AGENT_NAME, AGENT_PATH + "/control"),
+                       PIN_AGENT_NAME).Activate(timeout=2)
+        print("READY", flush=True)
+        return
+    name = dbus.service.BusName(PIN_AGENT_NAME, bus, do_not_queue=True)
+    # Keep the BusName alive for the entire event loop.
+    manager = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"),
+                             "org.bluez.AgentManager1")
+    loop = GLib.MainLoop()
+    agent = make_pairing_agent(dbus, bus, None, None, on_release=loop.quit)
+
+    class Control(dbus.service.Object):
+        @dbus.service.method(PIN_AGENT_NAME, in_signature="", out_signature="")
+        def Activate(self):
+            manager.RequestDefaultAgent(AGENT_PATH, timeout=2)
+
+        @dbus.service.method(PIN_AGENT_NAME, in_signature="", out_signature="")
+        def Stop(self):
+            GLib.idle_add(loop.quit)
+
+    control = Control(bus, AGENT_PATH + "/control")
+    registered = False
+    try:
+        manager.RegisterAgent(AGENT_PATH, "KeyboardOnly", timeout=2)
+        registered = True
+        control.Activate()
+        print("READY", flush=True)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, loop.quit)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, loop.quit)
+        bus.add_signal_receiver(
+            lambda owner, old, new: loop.quit() if not new else None,
+            signal_name="NameOwnerChanged", dbus_interface="org.freedesktop.DBus",
+            arg0="org.bluez")
+        loop.run()
+    finally:
+        if registered:
+            try:
+                manager.UnregisterAgent(AGENT_PATH, timeout=2)
+            except Exception:
+                pass
+        control.remove_from_connection()
+        agent.remove_from_connection()
+        bus.close()
+
+
+def ensure_pin_agent(dry_run: bool) -> None:
+    if dry_run:
+        print("Would start/reuse the background e-puck PIN agent for later connections")
+        return
+    worker = None
+    try:
+        worker = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--pin-agent"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            start_new_session=True,
+        )
+        ready, _, _ = select.select([worker.stdout], [], [], 5)
+        message = worker.stdout.readline().strip() if ready else "Startup timed out"
+        if message != "READY":
+            raise RuntimeError(message or "Agent exited before becoming ready")
+        print("Background PIN agent ready for uploads and serial monitoring")
+    except Exception as error:
+        if worker is not None and worker.poll() is None:
+            worker.terminate()
+            try:
+                worker.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait()
+        print(f"Warning: background PIN agent unavailable ({error}); "
+              "continuing the original binding workflow.", file=sys.stderr)
+    finally:
+        if worker is not None and worker.stdout is not None:
+            worker.stdout.close()
+
+
+def stop_pin_agent() -> None:
+    import dbus
+    bus = dbus.SystemBus()
+    if bus.name_has_owner(PIN_AGENT_NAME):
+        dbus.Interface(bus.get_object(PIN_AGENT_NAME, AGENT_PATH + "/control"),
+                       PIN_AGENT_NAME).Stop(timeout=2)
+    print("Background e-puck PIN agent stopped")
 
 
 def pair_device(number: int, timeout: int) -> None:
@@ -244,6 +356,8 @@ def try_pair_epuck(number: int, dry_run: bool, timeout: int) -> None:
 
 def bind_epucks(epucks: dict[int, str], dry_run: bool, replace: bool,
                 pair: bool = True, pair_timeout: int = 30) -> None:
+    if pair:
+        ensure_pin_agent(dry_run)
     for number, mac in epucks.items():
         if pair:
             try_pair_epuck(number, dry_run, pair_timeout)
@@ -313,6 +427,11 @@ def parse_args() -> argparse.Namespace:
         "--pair-timeout", type=positive_seconds, default=30,
         help="Pairing/discovery timeout per robot in seconds (default: 30).",
     )
+    parser.add_argument(
+        "--stop-agent", action="store_true",
+        help="Stop the background PIN agent (e.g. before pairing unrelated devices).",
+    )
+    parser.add_argument("--pin-agent", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--pair-device", type=int, help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -320,6 +439,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     validate_epucks()
+
+    if args.pin_agent:
+        try:
+            run_pin_agent()
+        except Exception as error:
+            print(f"PIN agent startup failed: {error}. Ensure python3-dbus and "
+                  "python3-gi are installed and run with sudo.", flush=True)
+            return 1
+        return 0
+
+    if args.stop_agent:
+        if args.dry_run:
+            print("Would stop the background e-puck PIN agent")
+        else:
+            require_root(sys.argv[1:])
+            stop_pin_agent()
+        return 0
 
     if args.pair_device is not None:
         selected_epucks([args.pair_device])

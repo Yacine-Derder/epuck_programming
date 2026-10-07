@@ -123,6 +123,25 @@ class PairingTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 agent.AuthorizeService('/unknown', 'uuid')
 
+    def test_persistent_agent_uses_known_macs_only(self):
+        fake = FakeBlueZ()
+        fake.modules['dbus'].Interface = lambda *args: fake.device
+        agent = script.make_pairing_agent(fake.modules['dbus'], fake.bus, None, None)
+        for number, mac in script.EPUCKS.items():
+            fake.device.Get.return_value = mac.lower()
+            self.assertEqual(agent.RequestPinCode(fake.path), f'{number:04d}')
+        fake.device.Get.return_value = '00:11:22:33:44:55'
+        with self.assertRaisesRegex(Exception, 'Unknown e-puck'):
+            agent.RequestPinCode(fake.path)
+
+    def test_release_can_stop_persistent_agent(self):
+        fake = FakeBlueZ()
+        released = Mock()
+        agent = script.make_pairing_agent(fake.modules['dbus'], fake.bus, None, None,
+                                           on_release=released)
+        agent.Release()
+        released.assert_called_once()
+
     def test_pair_then_trust_and_unregister(self):
         fake = FakeBlueZ()
         fake.run()
@@ -183,10 +202,18 @@ class WorkflowTests(unittest.TestCase):
         self.output.enter_context(contextlib.redirect_stdout(io.StringIO()))
         self.output.enter_context(contextlib.redirect_stderr(io.StringIO()))
         self.addCleanup(self.output.close)
+        agent_patch = patch.object(script, 'ensure_pin_agent')
+        self.agent_start = agent_patch.start()
+        self.addCleanup(agent_patch.stop)
 
     def main(self, *args):
         with patch.object(sys, 'argv', ['bind_epucks.py', *args]):
             return script.main()
+
+    def test_agent_runs_once_before_binding(self):
+        with patch.object(script, 'try_pair_epuck'), patch.object(script, 'run_command'):
+            script.bind_epucks(script.selected_epucks([91, 76]), False, False)
+        self.agent_start.assert_called_once_with(False)
 
     def test_pairing_failures_still_bind_each_robot(self):
         failures = [subprocess.CompletedProcess([], 1, '', 'missing dependency'),
@@ -220,7 +247,7 @@ class WorkflowTests(unittest.TestCase):
     def test_dry_run_has_no_side_effects(self):
         with patch.object(script.subprocess, 'run') as run, patch.object(script, 'require_root') as root:
             for args in [('--dry-run',), ('--dry-run', '--replace', '91'),
-                         ('--dry-run', '--release', '91'), ('--dry-run', '--no-pair', '76')]:
+                         ('--dry-run', '--release', '91'), ('--dry-run', '--no-pair', '76'), ('--dry-run', '--stop-agent')]:
                 self.assertEqual(self.main(*args), 0)
             run.assert_not_called()
             root.assert_not_called()
@@ -241,6 +268,7 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(script, 'require_root'), patch.object(script, 'try_pair_epuck') as pair, patch.object(script.subprocess, 'run') as run:
             self.main('--no-pair', '91')
             pair.assert_not_called()
+            self.agent_start.assert_not_called()
             run.assert_called_once_with(['rfcomm', 'bind', '/dev/rfcomm91', script.EPUCKS[91], '1'], check=True)
 
     def test_invalid_input_before_side_effects(self):
@@ -261,6 +289,48 @@ class WorkflowTests(unittest.TestCase):
     def test_worker_missing_import_is_helpful(self):
         with patch.object(script, 'pair_device', side_effect=ImportError()):
             self.assertEqual(self.main('--pair-device', '91'), 1)
+
+
+class AgentStartupTests(unittest.TestCase):
+    def test_dry_run_never_launches_agent(self):
+        with patch.object(script.subprocess, 'Popen') as launch:
+            with contextlib.redirect_stdout(io.StringIO()):
+                script.ensure_pin_agent(True)
+            launch.assert_not_called()
+
+    def test_success_detaches_worker_and_closes_pipe(self):
+        worker = Mock()
+        worker.stdout.readline.return_value = 'READY\n'
+        with patch.object(script.subprocess, 'Popen', return_value=worker) as launch, \
+                patch.object(script.select, 'select', return_value=([worker.stdout], [], [])), \
+                contextlib.redirect_stdout(io.StringIO()):
+            script.ensure_pin_agent(False)
+        self.assertTrue(launch.call_args.kwargs['start_new_session'])
+        worker.terminate.assert_not_called()
+        worker.stdout.close.assert_called_once()
+
+    def test_failed_agent_warns_and_returns(self):
+        for message in ['startup failed', '']:
+            worker = Mock()
+            worker.stdout.readline.return_value = message
+            worker.poll.return_value = None
+            with patch.object(script.subprocess, 'Popen', return_value=worker), \
+                    patch.object(script.select, 'select', return_value=([worker.stdout], [], [])), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                script.ensure_pin_agent(False)
+            self.assertIn('continuing the original binding workflow', errors.getvalue())
+            worker.terminate.assert_called_once()
+            worker.stdout.close.assert_called_once()
+
+    def test_agent_start_timeout_is_bounded(self):
+        worker = Mock()
+        worker.poll.return_value = None
+        with patch.object(script.subprocess, 'Popen', return_value=worker), \
+                patch.object(script.select, 'select', return_value=([], [], [])), \
+                contextlib.redirect_stderr(io.StringIO()):
+            script.ensure_pin_agent(False)
+        worker.stdout.readline.assert_not_called()
+        worker.terminate.assert_called_once()
 
 
 if __name__ == '__main__':
