@@ -99,7 +99,40 @@ python3 bind_epucks.py --list
 
 #### What the Binding Script Does
 
-The `bind_epucks.py` script executes the following commands internally:
+The script first attempts to pair each selected robot through BlueZ and mark it
+trusted. Its PIN is the robot number padded to four digits (e.g. `91` → `0091`).
+Turn on Bluetooth and the robot for the initial pairing. Existing pairings are
+reused; the script does not delete pairing keys or change the desktop's default
+Bluetooth agent. BlueZ normally saves pairing keys across reboots on this machine.
+
+On Ubuntu/Debian, automatic pairing needs the system Python packages:
+
+```bash
+sudo apt install python3-dbus python3-gi
+sudo /usr/bin/python3 bind_epucks.py 91
+```
+
+If pairing fails, dependencies are missing, or the robot is unavailable, the
+script warns and still runs the original RFCOMM bind. Manual PIN entry may then
+be needed when uploading or monitoring. Pairing/discovery has a 30-second limit
+per robot, with a short allowance for cleanup. Select only the powered robots
+to avoid waiting for offline ones.
+
+```bash
+# Original binding workflow, without attempting pairing
+sudo python3 bind_epucks.py --no-pair 91
+
+# Allow more time for initial discovery/pairing
+sudo python3 bind_epucks.py --pair-timeout 60 91
+
+# Show intended actions without Bluetooth access, sudo, or changes
+python3 bind_epucks.py --dry-run --replace 91
+```
+
+`--list` and `--release` do not attempt pairing. `--replace` still releases the
+selected RFCOMM device before binding it, even when pairing fails.
+
+After the pairing attempt, the script executes:
 
 ```bash
 rfcomm bind /dev/rfcomm<EPUCK_NUMBER> <MAC_ADDRESS> 1

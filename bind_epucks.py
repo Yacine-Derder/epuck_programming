@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind known e-pucks to matching /dev/rfcomm numbers for epuckupload."""
+"""Best-effort pair/trust, then bind known e-pucks for epuckupload."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ EPUCKS = {
 }
 
 RFCOMM_CHANNEL = "1"
+AGENT_PATH = "/org/epuck/agent"
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 
@@ -64,8 +65,188 @@ def run_command(command: list[str], dry_run: bool) -> None:
         subprocess.run(command, check=True)
 
 
-def bind_epucks(epucks: dict[int, str], dry_run: bool, replace: bool) -> None:
+def make_pairing_agent(dbus, bus, device_path: str, number: int):
+    """Register credentials only for the selected robot, never a default agent."""
+    class Rejected(dbus.DBusException):
+        _dbus_error_name = "org.bluez.Error.Rejected"
+
+    class Agent(dbus.service.Object):
+        def check_device(self, device):
+            if str(device) != device_path:
+                raise Rejected("Unknown e-puck")
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
+        def RequestPinCode(self, device):
+            self.check_device(device)
+            return f"{number:04d}"
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
+        def RequestPasskey(self, device):
+            self.check_device(device)
+            return dbus.UInt32(number)
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+        def AuthorizeService(self, device, uuid):
+            self.check_device(device)
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+        def Cancel(self):
+            pass
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+        def Release(self):
+            pass
+
+    return Agent(bus, AGENT_PATH)
+
+
+def pair_device(number: int, timeout: int) -> None:
+    """Run inside an isolated worker so BlueZ cannot block RFCOMM binding.
+
+    Pair must be asynchronous: the GLib loop services BlueZ PIN callbacks.
+    Optional imports stay here so all original operations work without them.
+    """
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    objects = dbus.Interface(bus.get_object("org.bluez", "/"),
+                             "org.freedesktop.DBus.ObjectManager")
+    loop = GLib.MainLoop()
+    scans = []
+    agent = None
+    manager = None
+    device = None
+    pairing = False
+    errors = []
+    device_interface = "org.bluez.Device1"
+    adapter_interface = "org.bluez.Adapter1"
+    properties_interface = "org.freedesktop.DBus.Properties"
+
+    def finish(error=None):
+        if error is not None:
+            errors.append(error)
+        loop.quit()
+
+    def paired():
+        nonlocal pairing
+        pairing = False
+        try:
+            properties = dbus.Interface(device, properties_interface)
+            properties.Set(device_interface, "Trusted", dbus.Boolean(True), timeout=2)
+            finish()
+        except Exception as error:
+            finish(error)
+
+    def find_device():
+        nonlocal agent, manager, device, pairing
+        try:
+            managed = objects.GetManagedObjects(timeout=2)
+            matches = [(path, interfaces[device_interface])
+                       for path, interfaces in managed.items()
+                       if device_interface in interfaces
+                       and str(interfaces[device_interface].get("Address", "")).upper()
+                       == EPUCKS[number].upper()]
+            # Prefer a saved pairing if more than one adapter knows this MAC.
+            matches.sort(key=lambda item: not bool(item[1].get("Paired", False)))
+            if not matches:
+                return True
+            path, properties = matches[0]
+            device = bus.get_object("org.bluez", path)
+            if properties.get("Paired", False):
+                paired()
+                return False
+            agent = make_pairing_agent(dbus, bus, str(path), number)
+            manager = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"),
+                                     "org.bluez.AgentManager1")
+            manager.RegisterAgent(AGENT_PATH, "KeyboardOnly", timeout=2)
+            pairing = True
+            dbus.Interface(device, device_interface).Pair(
+                reply_handler=paired, error_handler=finish, timeout=timeout)
+            return False
+        except Exception as error:
+            finish(error)
+            return False
+
+    def start():
+        try:
+            managed = objects.GetManagedObjects(timeout=2)
+            # A cached device can be paired without discovery.
+            if any(device_interface in interfaces
+                   and str(interfaces[device_interface].get("Address", "")).upper()
+                   == EPUCKS[number].upper() for interfaces in managed.values()):
+                find_device()
+                return False
+            for path, interfaces in managed.items():
+                if interfaces.get(adapter_interface, {}).get("Powered", False):
+                    adapter = dbus.Interface(bus.get_object("org.bluez", path),
+                                             adapter_interface)
+                    adapter.StartDiscovery(timeout=2)
+                    scans.append(adapter)
+            if not scans:
+                raise RuntimeError("No powered Bluetooth adapter; turn Bluetooth on")
+            GLib.timeout_add(250, find_device)
+        except Exception as error:
+            finish(error)
+        return False
+
+    def expired():
+        finish(TimeoutError(f"Pairing/discovery timed out after {timeout}s"))
+        return False
+
+    GLib.idle_add(start)
+    GLib.timeout_add_seconds(timeout, expired)
+    try:
+        loop.run()
+    finally:
+        # Stop only this application's discovery sessions; preserve saved keys.
+        if pairing and device is not None:
+            try:
+                dbus.Interface(device, device_interface).CancelPairing(timeout=2)
+            except Exception:
+                pass
+        for adapter in scans:
+            try:
+                adapter.StopDiscovery(timeout=2)
+            except Exception:
+                pass
+        if manager is not None and agent is not None:
+            try:
+                manager.UnregisterAgent(AGENT_PATH, timeout=2)
+            except Exception:
+                pass
+    if errors:
+        raise RuntimeError(str(errors[0]))
+
+
+def try_pair_epuck(number: int, dry_run: bool, timeout: int) -> None:
+    if dry_run:
+        print(f"Would pair/trust e-puck {number} ({EPUCKS[number]}) if needed")
+        return
+    print(f"Pairing/trusting e-puck {number} if needed...", flush=True)
+    try:
+        result = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--pair-device", str(number),
+             "--pair-timeout", str(timeout)],
+            capture_output=True, text=True, timeout=timeout + 5, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "Pairing worker failed")
+        print(f"e-puck {number}: paired and trusted")
+    except Exception as error:
+        print(f"Warning: e-puck {number}: automatic pairing unavailable ({error}). "
+              "Continuing with rfcomm binding; manual PIN entry may be needed. "
+              "Use --no-pair to skip pairing.", file=sys.stderr)
+
+
+def bind_epucks(epucks: dict[int, str], dry_run: bool, replace: bool,
+                pair: bool = True, pair_timeout: int = 30) -> None:
     for number, mac in epucks.items():
+        if pair:
+            try_pair_epuck(number, dry_run, pair_timeout)
         device = rfcomm_device(number)
 
         if replace:
@@ -85,6 +266,13 @@ def release_epucks(epucks: dict[int, str], dry_run: bool) -> None:
 def list_epucks() -> None:
     for number, mac in sorted(EPUCKS.items()):
         print(f"e-puck {number}: {mac} -> {rfcomm_device(number)}")
+
+
+def positive_seconds(value: str) -> int:
+    seconds = int(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("Timeout must be a positive number of seconds")
+    return seconds
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,12 +305,34 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the rfcomm commands without running them.",
     )
+    parser.add_argument(
+        "--no-pair", action="store_true",
+        help="Skip automatic pairing/trusting and only run the original rfcomm workflow.",
+    )
+    parser.add_argument(
+        "--pair-timeout", type=positive_seconds, default=30,
+        help="Pairing/discovery timeout per robot in seconds (default: 30).",
+    )
+    parser.add_argument("--pair-device", type=int, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     validate_epucks()
+
+    if args.pair_device is not None:
+        selected_epucks([args.pair_device])
+        try:
+            pair_device(args.pair_device, args.pair_timeout)
+        except ImportError:
+            print("Install python3-dbus and python3-gi (sudo apt install "
+                  "python3-dbus python3-gi), then use /usr/bin/python3", file=sys.stderr)
+            return 1
+        except Exception as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        return 0
 
     if args.list:
         list_epucks()
@@ -136,7 +346,8 @@ def main() -> int:
     if args.release:
         release_epucks(epucks, args.dry_run)
     else:
-        bind_epucks(epucks, args.dry_run, args.replace)
+        bind_epucks(epucks, args.dry_run, args.replace,
+                    pair=not args.no_pair, pair_timeout=args.pair_timeout)
 
     return 0
 
